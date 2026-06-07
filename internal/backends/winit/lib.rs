@@ -731,6 +731,17 @@ impl i_slint_core::platform::Platform for Backend {
                 ));
             }
         }
+        #[cfg(target_os = "macos")]
+        if let Some(ctx) = _ctx.upgrade() {
+            // `+[NSFont systemFontSize]` is the AppKit body-text size (typically 13pt);
+            // on macOS one point = one logical pixel.
+            let size = objc2_app_kit::NSFont::systemFontSize() as f32;
+            if size > 0.0 {
+                ctx.set_platform_default_font_size(Some(
+                    i_slint_core::lengths::LogicalLength::new(size),
+                ));
+            }
+        }
     }
 
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
