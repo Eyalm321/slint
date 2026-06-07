@@ -1,19 +1,23 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// End-to-end test of the slint-ui npm distribution against a local (synthetic)
-// Verdaccio registry: publish the tarballs with the same `publishAll` routine the
-// real publish uses, then install them as a real consumer would (npm and pnpm)
-// and verify that:
+// End-to-end test of the slint-ui / slint-ui-dev npm distribution against a local
+// (synthetic) Verdaccio registry: publish the tarballs with the same `publishAll`
+// routine the real publish uses, then install them as a real consumer would (npm
+// and pnpm) and verify that:
 //   * `npm i slint-ui` automatically installs the matching platform binary
-//     package and slint-ui loads, and
-//   * a simple consumer TypeScript project type-checks against slint-ui's types.
+//     package, slint-ui loads, and only the release features are present,
+//   * a simple consumer TypeScript project type-checks against slint-ui's types,
+//   * adding slint-ui-dev makes the dev binary (testing/system-testing/mcp)
+//     auto-picked-up,
+//   * a version mismatch warns and falls back to the release binary, and
+//   * importing slint-ui-dev directly throws.
 //
 // Two modes:
 //   * Gate (publish workflow): SLINT_E2E_TGZ_DIR/_VERSION/_TAG point at the real,
-//     already-built tarballs — see publish_npm_package.yaml.
+//     already-built all-platform tarballs — see publish_npm_package.yaml.
 //   * Dev (local): builds and packs the host packages on the fly under a
-//     throwaway version (needs `pnpm build` in api/node).
+//     throwaway version (needs `pnpm build` + `pnpm build:debug` in api/node).
 //
 // Run with `node --test` (Node >= 23 strips types automatically; older Node needs
 // --experimental-strip-types).
@@ -27,8 +31,10 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
     cpSync,
+    existsSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     readdirSync,
     rmSync,
     writeFileSync,
@@ -41,6 +47,7 @@ import type { Server } from "node:http";
 import {
     NAPI_TARGETS,
     packBinary,
+    packDevMeta,
     publishAll,
     run,
     setMainBinaryDeps,
@@ -58,6 +65,9 @@ const VERSION = providedTgzDir
     ? (process.env.SLINT_E2E_VERSION ?? "")
     : "0.0.0-e2e";
 const PUBLISH_TAG = providedTgzDir ? (process.env.SLINT_E2E_TAG ?? "") : "e2e";
+// A deliberately different version, written into the installed slint-ui-dev to
+// trigger binding.cjs's version-mismatch fallback.
+const MISMATCH_VERSION = "0.0.0-mismatch";
 const here = dirname(fileURLToPath(import.meta.url)); // api/node/__test__/registry
 const nodeDir = join(here, "..", ".."); // api/node
 const repoRoot = join(nodeDir, "..", ".."); // repository root
@@ -84,7 +94,7 @@ before(async () => {
         tgzDir = providedTgzDir;
     } else {
         // Dev mode: build and pack the host packages on the fly (main first,
-        // before the per-platform npm-* dir would land in its tarball).
+        // before the per-platform npm-* dirs would land in its tarball).
         const binary = readdirSync(nodeDir).find((f) =>
             /^slint-ui\..+\.node$/.test(f),
         );
@@ -93,21 +103,32 @@ before(async () => {
             "host slint-ui.<target>.node not built (run `pnpm build`)",
         );
         const hostTarget = binary.replace(/^slint-ui\.(.+)\.node$/, "$1");
+        assert.ok(
+            existsSync(join(nodeDir, `slint-ui-dev.${hostTarget}.node`)),
+            "host dev binary not built (run `pnpm build:debug`)",
+        );
+        const targets = [hostTarget];
         tgzDir = join(work, "tgz");
         mkdirSync(tgzDir, { recursive: true });
         await run("npm", ["pkg", "set", `version=${VERSION}`], {
             cwd: nodeDir,
         });
-        setMainBinaryDeps({ version: VERSION, targets: [hostTarget] });
+        setMainBinaryDeps({ version: VERSION, targets });
         await run("pnpm", ["pack", "--pack-destination", tgzDir], {
             cwd: nodeDir,
         });
-        await packBinary({
-            config: "binaries.json",
-            target: hostTarget,
-            binary: "slint-ui",
-            dest: tgzDir,
-        });
+        for (const [config, binary] of [
+            ["binaries.json", "slint-ui"],
+            ["binaries-dev.json", "slint-ui-dev"],
+        ] as const) {
+            await packBinary({
+                config,
+                target: hostTarget,
+                binary,
+                dest: tgzDir,
+            });
+        }
+        await packDevMeta({ version: VERSION, dest: tgzDir, targets });
     }
 
     // In-process Verdaccio: binds 127.0.0.1 directly, no readiness polling.
@@ -148,14 +169,23 @@ after(() => {
     }
     if (!providedTgzDir) {
         // Dev mode only: remove generated packaging artifacts and restore the
-        // manifest the shared packing functions edit in place.
+        // manifests the shared packing functions edit in place.
         rmSync(join(nodeDir, "npm-slint-ui"), { recursive: true, force: true });
+        rmSync(join(nodeDir, "npm-slint-ui-dev"), {
+            recursive: true,
+            force: true,
+        });
+        rmSync(join(nodeDir, "dev-package", "rust-module-dev.cjs"), {
+            force: true,
+        });
+        rmSync(join(nodeDir, "dev-package", "LICENSE.md"), { force: true });
         execFile("git", [
             "-C",
             repoRoot,
             "checkout",
             "--",
             "api/node/package.json",
+            "api/node/dev-package/package.json",
         ]);
     }
 });
@@ -165,7 +195,13 @@ async function consumerProject(name: string): Promise<string> {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
     cpSync(join(work, ".npmrc"), join(dir, ".npmrc"));
-    cpSync(join(here, "assert_load.cts"), join(dir, "assert_load.cts"));
+    for (const fixture of [
+        "assert_load.cts",
+        "assert_features.cts",
+        "assert_guard.cts",
+    ]) {
+        cpSync(join(here, fixture), join(dir, fixture));
+    }
     await run("npm", ["init", "-y"], { cwd: dir, env: npmEnv() });
     return dir;
 }
@@ -176,6 +212,13 @@ function install(pm: string, dir: string, args: string[]) {
             ? ["install", "--no-audit", "--no-fund", ...args]
             : ["add", ...args];
     return run(pm, cmd, { cwd: dir, env: npmEnv() });
+}
+
+function assertFeatures(dir: string, wantDev: boolean) {
+    return run("node", [...stripArgs, "./assert_features.cts"], {
+        cwd: dir,
+        env: { ...process.env, WANT_DEV: wantDev ? "1" : "" },
+    });
 }
 
 // Whether at least one @slint-ui/slint-ui-binary-<target> got auto-installed for
@@ -199,15 +242,63 @@ async function binaryInstalled(dir: string): Promise<boolean> {
 
 for (const pm of ["npm", "pnpm"] as const) {
     test(`${pm}: installing slint-ui pulls in the binary and loads`, async () => {
-        const dir = await consumerProject(pm);
+        const dir = await consumerProject(`${pm}-prod`);
         await install(pm, dir, [`slint-ui@${VERSION}`]);
         // The matching platform binary package is installed automatically…
         assert.ok(
             await binaryInstalled(dir),
             "no @slint-ui/slint-ui-binary-* was installed",
         );
-        // …and slint-ui loads (assert_load.cts throws/exits non-zero otherwise).
+        // …slint-ui loads (assert_load.cts throws/exits non-zero otherwise)…
         await run("node", [...stripArgs, "./assert_load.cts"], { cwd: dir });
+        // …with only the release features, and slint-ui-dev is not pulled in.
+        await assertFeatures(dir, false);
+        assert.ok(
+            !existsSync(join(dir, "node_modules", "slint-ui-dev")),
+            "slint-ui-dev must not be installed in a production install",
+        );
+    });
+
+    test(`${pm}: dev install auto-picks-up the dev binary`, async () => {
+        const dir = await consumerProject(`${pm}-dev`);
+        await install(pm, dir, [`slint-ui@${VERSION}`]);
+        await install(
+            pm,
+            dir,
+            pm === "npm"
+                ? ["--save-dev", `slint-ui-dev@${VERSION}`]
+                : ["-D", `slint-ui-dev@${VERSION}`],
+        );
+
+        await assertFeatures(dir, true);
+
+        // Importing slint-ui-dev directly must throw.
+        await run("node", [...stripArgs, "./assert_guard.cts"], { cwd: dir });
+
+        // A version mismatch warns and falls back to the release binary.
+        const { stdout } = await run(
+            "node",
+            [
+                "-e",
+                'process.stdout.write(require.resolve("slint-ui-dev/package.json"))',
+            ],
+            { cwd: dir },
+        );
+        const manifest = JSON.parse(readFileSync(stdout.trim(), "utf8"));
+        manifest.version = MISMATCH_VERSION;
+        writeFileSync(stdout.trim(), JSON.stringify(manifest));
+
+        const { stderr } = await assertFeatures(dir, false);
+        // The warning names both versions and points at the fix; assert all of it.
+        const escape = (v: string) => v.replaceAll(".", "\\.");
+        assert.match(
+            stderr,
+            new RegExp(
+                `\\[slint-ui\\] Ignoring slint-ui-dev ${escape(MISMATCH_VERSION)}: ` +
+                    `it does not match slint-ui ${escape(VERSION)}\\. ` +
+                    `Install slint-ui-dev@${escape(VERSION)}`,
+            ),
+        );
     });
 }
 
@@ -238,8 +329,9 @@ test("a consumer TypeScript project type-checks against slint-ui", async () => {
 });
 
 function verdaccioConfig(storage: string): string {
-    // The native binary packages are large, so lift the default 10mb body limit.
-    // @slint-ui/* and slint-ui are served locally; everything else is proxied.
+    // The native binary packages are large (especially debug builds), so lift the
+    // default 10mb body limit. @slint-ui/*, slint-ui and slint-ui-dev are served
+    // locally; everything else is proxied to npmjs.
     return `storage: ${storage}
 max_body_size: 2gb
 uplinks:
@@ -250,6 +342,9 @@ packages:
     access: $all
     publish: $all
   'slint-ui':
+    access: $all
+    publish: $all
+  'slint-ui-dev':
     access: $all
     publish: $all
   '**':

@@ -30,6 +30,25 @@ Slint is available via NPM, so you can install by running the following command:
 npm install slint-ui
 ```
 
+By default this installs the release binaries, which is what you want for
+production and deployment.
+
+### Development binaries (slint-ui-dev)
+
+For development you can additionally install the `slint-ui-dev` package, which
+provides binaries with extra capabilities compiled in: time mocking for tests,
+the system-testing backend, and the embedded [MCP](https://modelcontextprotocol.io/)
+server for introspecting a running UI. Install it as a dev dependency at the
+same version as `slint-ui`:
+
+```sh
+npm install --save-dev slint-ui-dev
+```
+
+There is nothing to import from `slint-ui-dev` — when it is present, `slint-ui`
+picks the development binary up automatically. It is never required at runtime in
+production.
+
 ### Dependencies
 
 You need to install the following components:

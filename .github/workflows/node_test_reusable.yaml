@@ -48,7 +48,9 @@ jobs:
               working-directory: api/node
               run: pnpm install --frozen-lockfile
             - name: Build node plugin in debug
-              run: pnpm build:testing
+              # build:debug builds the "dev" binary (testing + system-testing + mcp)
+              # so the test suite exercises all optional capabilities.
+              run: pnpm build:debug
               working-directory: api/node
             - name: Type-check registry e2e fixtures
               # Type-checked here (not in the standalone typecheck job) because it
@@ -59,6 +61,9 @@ jobs:
             - name: Run node tests
               working-directory: api/node
               run: pnpm test
+            # The registry end-to-end test (api/node/__test__/registry/e2e.test.mts)
+            # runs as a gate in the npm publish workflow against the real, all-platform
+            # tarballs — see publish_npm_package.yaml.
             - name: Run test-driver-nodejs
               # Release is only applied to the harness that drives the node.js invocations, but needed
               # to avoid crashing on Windows with what looks like an out of stack exception.

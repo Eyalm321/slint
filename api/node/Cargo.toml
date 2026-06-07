@@ -39,8 +39,15 @@ renderer-skia-vulkan = ["slint-interpreter/renderer-skia-vulkan"]
 renderer-software = ["slint-interpreter/renderer-software"]
 accessibility = ["slint-interpreter/accessibility"]
 
-# Removed by node_package xtask
+# The features below enable the additional capabilities that are compiled into
+# the "dev" binary (slint-ui-dev, see binaries-dev.json). They are additive and
+# binary-compatible with the default build: they don't change the napi surface,
+# they only enable extra runtime behavior (mocked time for `testing`, and the
+# auto-started system-testing/MCP servers via the backend selector). They depend
+# on the unpublished i-slint-backend-testing crate.
 testing = ["dep:i-slint-backend-testing"]
+system-testing = ["dep:i-slint-backend-testing", "i-slint-backend-selector/system-testing"]
+mcp = ["dep:i-slint-backend-testing", "i-slint-backend-selector/mcp"]
 
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi8"] }
